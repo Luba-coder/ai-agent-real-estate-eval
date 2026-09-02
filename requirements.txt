@@ -1,0 +1,37 @@
+# Data processing and analysis
+pandas
+numpy
+openpyxl
+
+# HTTP requests
+requests
+
+# Evaluation frameworks
+deepeval==3.2.1
+ragas
+opik
+eval-ai-library
+
+
+# Required for RAGAS
+datasets
+sentence-transformers
+
+# Agent API
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+# LangChain + локальная LLM Ollama
+langchain
+langchain-core
+langchain-ollama
+langchain-classic
+
+# Tracing
+langfuse
+
+# HTML parsing and HTTP client for semantic scraper
+beautifulsoup4
+httpx

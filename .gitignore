@@ -1,0 +1,29 @@
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+venv/
+venv_eval/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime/evaluation outputs
+results/*
+!results/.gitkeep
+reports/
