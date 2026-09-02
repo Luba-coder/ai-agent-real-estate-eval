@@ -200,7 +200,9 @@ def run_question(question: str, urls: list[str], max_items: int = 50,
         except Exception:
             continue
 
+    langfuse_client.flush()
+
     return {
-        "output": result.get("output"),
+        "output": result.get("output", ""),
         "tools_used": tools_used,
     }
