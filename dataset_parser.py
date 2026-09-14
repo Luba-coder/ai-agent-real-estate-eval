@@ -8,7 +8,7 @@ class DatasetParser:
     """Простой парсер датасета для оценки"""
 
     def __init__(self):
-        self.required_columns = ['question']  # Только question обязательно
+        self.required_columns = ["case_id", "question"]
         self.optional_columns = ['expected_response', 'expected_tools']
 
     def load_dataset(self, file_path: str) -> Optional[pd.DataFrame]:
@@ -34,8 +34,11 @@ class DatasetParser:
                 print(f"Найденные колонки: {list(df.columns)}")
                 return None
 
+            df["case_id"] = df["case_id"].astype(str).str.strip()
+            df["question"] = df["question"].astype(str).str.strip()
+
             # Удаляем строки с пустыми значениями в обязательных колонках
-            df_clean = df.dropna(subset=self.required_columns)
+            df_clean = df.dropna(subset=self.required_columns).reset_index(drop=True)
 
             print(f"Загружен датасет с {len(df_clean)} вопросами")
 
@@ -125,6 +128,7 @@ class DatasetParser:
             else:
                 expected_response = str(expected_response).strip()
             pair = {
+                'case_id': str(row['case_id']).strip(),
                 'question': row['question'],
                 'expected_response': expected_response,
                 'expected_tools': expected_tools_list[i] if i < len(expected_tools_list) else []

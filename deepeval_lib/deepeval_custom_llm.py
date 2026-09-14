@@ -1,121 +1,108 @@
 """
-Кастомная модель DeepEval для работы через прокси сервер
-Следует официальной документации DeepEval
+Кастомная модель DeepEval для локального запуска через Ollama.
 """
+
 import os
-from typing import Optional, Dict, Any
-from openai import OpenAI
+from typing import Optional, Union
+
+from pydantic import BaseModel
+from langchain_ollama import ChatOllama
 from deepeval.models.base_model import DeepEvalBaseLLM
 
 
-class ProxyLLM(DeepEvalBaseLLM):
-    """
-    Кастомная модель для DeepEval, которая работает через прокси сервер
-    """
+class OllamaLLM(DeepEvalBaseLLM):
+    """Локальная Ollama-модель в роли LLM-as-a-judge для DeepEval."""
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
-        api_key: Optional[str] = None,
+        model: Optional[str] = None,
         base_url: Optional[str] = None,
-        temperature: float = 0.1
+        temperature: float = 0.0,
+        num_ctx: Optional[int] = None,
     ):
-        # Сохраняем название модели
-        self._model_name = model
-        self.temperature = temperature
-
-        # Получаем настройки из переменных окружения или используем переданные
-        self.api_key = api_key or os.getenv(
-            "PROXY_API_KEY",
-            "sk-proxy-your-key"
-        )
+        self._model_name = model or os.getenv("DEEPEVAL_OLLAMA_MODEL", os.getenv(
+            "OLLAMA_MODEL", "qwen2.5:7b"
+        ))
         self.base_url = base_url or os.getenv(
-            "PROXY_BASE_URL",
-            "http://5.11.83.110:8000"
+            "OLLAMA_BASE_URL",
+            "http://localhost:11434",
+        )
+        self.temperature = temperature
+        self.num_ctx = num_ctx or int(os.getenv("OLLAMA_NUM_CTX", "12288"))
+
+        self.client = ChatOllama(
+            model=self._model_name,
+            base_url=self.base_url,
+            temperature=self.temperature,
+            num_ctx=self.num_ctx,
         )
 
-        # Создаем клиент OpenAI с прокси настройками
-        # ВАЖНО: Ваш прокси использует Bearer токен в Authorization
-        self.client = OpenAI(
-            # Это попадет в Authorization: Bearer {api_key}
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
-
-        # НЕ вызываем super().__init__() - вместо этого устанавливаем self.model вручную
         self.model = self.client
 
     def load_model(self):
-        """
-        Загрузка модели (требуется DeepEval)
-        Возвращает клиент OpenAI
-        """
+        """Возвращает LangChain-клиент локальной Ollama."""
         return self.client
 
-    def generate(self, prompt: str) -> str:
-        try:
-            response = self.client.chat.completions.create(
-                model=self._model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature
-            )
+    def generate(
+        self,
+        prompt: str,
+        schema: Optional[type[BaseModel]] = None,
+    ) -> Union[str, BaseModel]:
+        """
+        Генерирует ответ judge-модели.
 
-            return response.choices[0].message.content
+        Без schema возвращает строку.
+        Со schema возвращает Pydantic-объект — это требуется части метрик DeepEval.
+        """
+        if schema is not None:
+            structured_client = self.client.with_structured_output(schema)
+            return structured_client.invoke(prompt)
 
-        except Exception as e:
-            print(f"❌ Ошибка при генерации через прокси: {e}")
-            raise
+        response = self.client.invoke(prompt)
+        return response.content
 
-    async def a_generate(self, prompt: str) -> str:
-        # DeepEval может использовать async для параллельной оценки
-        # Для простоты используем синхронную версию
-        return self.generate(prompt)
+    async def a_generate(
+        self,
+        prompt: str,
+        schema: Optional[type[BaseModel]] = None,
+    ) -> Union[str, BaseModel]:
+        """Асинхронная генерация через Ollama."""
+        if schema is not None:
+            structured_client = self.client.with_structured_output(schema)
+            return await structured_client.ainvoke(prompt)
+
+        response = await self.client.ainvoke(prompt)
+        return response.content
 
     def get_model_name(self) -> str:
-        """
-        Получить название модели (требуется DeepEval)
-        """
-        return self._model_name
+        """Название judge-модели для логов DeepEval."""
+        return f"ollama:{self._model_name}"
 
 
-def create_proxy_model(
-    model: str = "gpt-4o-mini",
-    api_key: Optional[str] = None,
+def create_ollama_model(
+    model: Optional[str] = None,
     base_url: Optional[str] = None,
-    temperature: float = 0.1
-) -> ProxyLLM:
-
-    return ProxyLLM(
+    temperature: float = 0.0,
+    num_ctx: Optional[int] = None,
+) -> OllamaLLM:
+    """Фабрика локальной модели для DeepEval."""
+    return OllamaLLM(
         model=model,
-        api_key=api_key,
         base_url=base_url,
-        temperature=temperature
+        temperature=temperature,
+        num_ctx=num_ctx,
     )
 
 
-# Тестирование модели при запуске файла напрямую
 if __name__ == "__main__":
-    # Тест прокси модели
-    print("🔄 Тестирование ProxyLLM...")
+    from dotenv import load_dotenv
 
-    # Создаем модель
-    proxy_model = create_proxy_model(
-        model="gpt-4o-mini",
-        api_key="sk-proxy-your-key",
-        base_url="http://5.11.83.110:8000"
-    )
+    load_dotenv()
 
-    # Тестовый промпт
-    test_prompt = "Explain what is RAG in one sentence."
+    judge_model = create_ollama_model()
+    prompt = "Объясни одним коротким предложением, что такое RAG."
 
-    print(f"\n📝 Промпт: {test_prompt}")
-    print(f"🤖 Модель: {proxy_model.get_model_name()}")
-    print(f"🌐 Прокси: {proxy_model.base_url}")
-    print(f"🔑 API Key: {proxy_model.api_key[:20]}...")
-
-    # Генерируем ответ
-    try:
-        response = proxy_model.generate(test_prompt)
-        print(f"\n✅ Ответ: {response}")
-    except Exception as e:
-        print(f"\n❌ Ошибка: {e}")
+    print("Тестирование локальной Ollama judge-модели")
+    print(f"Модель: {judge_model.get_model_name()}")
+    print(f"Ollama URL: {judge_model.base_url}")
+    print(f"Ответ: {judge_model.generate(prompt)}")

@@ -13,79 +13,196 @@ from langfuse.langchain import CallbackHandler
 from .semantic_scraper import extract_offers
 from .tools_ext import compute_stats, filter_offers, normalize_offers_currency
 
-_SESSION_STATE = {"offers": []}
+_SESSION_STATE = {
+    "offers": [],
+    "current_offers": [],
+}
+SYSTEM = """
+Ты — многоцелевой агент мониторинга цен на жильё.
 
-SYSTEM = (
-    """Ты — многоцелевой агент мониторинга цен на жильё. 
-    Если пользователь дал URL — сначала извлеки объявления (title, price, currency, url). 
-    Дальше по вопросу выбери нужные действия: подсчитать статистику, отфильтровать по цене/ключевым словам, 
-    Всегда вызывай инструменты именованными аргументами строго по их JSON-схеме
-    если 'offers' не указан, инструмент использует последние извлечённые объявления.
-    нормализовать валюту (в RUB, USD, EUR), сравнить несколько ссылок, собрать общий отчёт. 
-    Отвечай кратко и по-русски, при необходимости показывай 3–5 примеров ссылок."""
-)
+Правила работы с URL и объявлениями:
+1. Если в поле "Ссылки" передан полный URL, сначала вызови extract_offers
+   для каждого URL.
+2. Вызывай extract_offers только с полным URL, начинающимся с http://
+   или https://.
+3. Не вызывай extract_offers с текстом "по этой ссылке", "эта ссылка",
+   "ссылка выше" или с пустой строкой.
+4. Если поле "Ссылки" пустое, используй ранее сохранённые объявления.
+   Не проси URL повторно, если в текущем запуске уже есть сохранённые offers.
+
+Правила выбора tools:
+5. Если пользователь просит найти/показать объявления дешевле или дороже
+   указанной цены — обязательно вызови filter_offers.
+6. Если пользователь просит найти объявления по слову, типу жилья,
+   району или другому текстовому признаку — обязательно вызови filter_offers.
+7. Если пользователь просит перевести/конвертировать цены в RUB, USD или EUR —
+   обязательно вызови normalize_offers_currency. Никогда не конвертируй
+   валюту самостоятельно в финальном тексте.
+8. Если пользователь просит минимум, максимум, среднее, медиану
+   или статистику — обязательно вызови compute_stats.
+9. Для сложного запроса вызывай tools последовательно в нужном порядке:
+   filter_offers → normalize_offers_currency → compute_stats.
+10. Всегда используй результат последнего tool call в следующем шаге
+    и в финальном ответе.
+11. Не добавляй в итоговый ответ объявления, которых нет в результате
+    последнего tool call.
+12. Не утверждай, что объект дешевле/дороже лимита, если не сравнил
+    его цену с этим лимитом. Не добавляй объектов, не прошедших filter_offers.
+13. Не вызывай compute_stats, если пользователь явно не просил
+    статистику, минимум, максимум, среднее или медиану.
+14. Если filter_offers вернул пустой список, сообщи, что подходящих
+    объявлений не найдено. Не вызывай normalize_offers_currency
+    и compute_stats для пустого списка, если пользователь не попросил
+    это явно.
+
+    Аргументы filter_offers должны иметь такой JSON-вид:
+    {{"max_price": 1800}}
+    {{"min_price": 1000}}
+    {{"text_contains": "pet friendly"}}
+
+    Для max_price и min_price передавай только число без валюты:
+    1800, а не "1800 USD", не {{"description": "1800 USD"}}
+    и не любой другой объект.
+
+КРИТИЧЕСКИЕ ПРАВИЛА ДОСТОВЕРНОСТИ:
+
+- Используй в финальном ответе только объявления, которые вернул
+  последний релевантный tool call.
+- Никогда не создавай, не угадывай и не подставляй примерные ссылки,
+  URL, названия квартир, цены или валюты.
+- URL вида example.com, example1.com, example2.com, example3.com
+  запрещены: их нельзя показывать пользователю.
+- Если после filter_offers получился пустой список, ответь ровно:
+  «Подходящих объявлений не найдено.»
+  Не добавляй примеры, альтернативы, ссылки, статистику или цены.
+- Если список пустой, не сообщай, что выполнялась конвертация цен:
+  конвертировать нечего.
+- Выводи статистику только если пользователь прямо попросил статистику,
+  min/max/average/median.
+- Значения статистики можно брать только из compute_stats, а цены —
+  только из normalize_offers_currency или filter_offers. 
+
+Всегда вызывай инструменты именованными аргументами строго по JSON-схеме.
+filter_offers, normalize_offers_currency и compute_stats всегда работают
+с текущим серверным набором объявлений. Не передавай в них списки offers
+или prices: в JSON-схеме таких полей нет.
+
+Отвечай кратко и по-русски. Не придумывай объявления, цены, валюты,
+ссылки и результаты конвертации.
+"""
 
 
 @observe(name="extract_offers")
-def _extract_offers_tool(url: str, limit: int = 50) -> list[dict]:
-    res = extract_offers(url, limit=limit)
-    out = [o.dict() for o in res.offers]
-    _SESSION_STATE["offers"] = out
-    return out
+def _extract_offers_tool(url: str, limit: int = 10) -> Any:
+    """Извлекает объявления по HTTP(S)-URL."""
+    url = (url or "").strip()
 
+    if not url.startswith(("http://", "https://")):
+        return {
+            "error": "Для extract_offers нужен полный URL, начинающийся с http:// или https://.",
+            "offers": [],
+        }
+
+    result = extract_offers(url, limit=limit)
+    offers = [offer.dict() for offer in result.offers]
+    _SESSION_STATE["offers"] = list(offers)
+    _SESSION_STATE["current_offers"] = list(offers)
+
+    return {
+        "offers": offers,
+    }
 
 @observe(name="filter_offers")
-def _filter_offers_tool(offers: Optional[List[Dict[str, Any]]] = None, min_price: Optional[int] = None,
-                        max_price: Optional[int] = None,
-                        text_contains: str = "") -> List[dict]:
-    if offers is None:
-        offers = _SESSION_STATE.get("offers", [])
-    return filter_offers(offers, min_price, max_price, text_contains)
+def _filter_offers_tool(
+    max_price: Optional[int] = None,
+    min_price: Optional[int] = None,
+    text_contains: Optional[str] = None,
+) -> list[dict]:
+    offers = _SESSION_STATE.get("current_offers", [])
+
+    result = filter_offers(
+        offers=offers,
+        max_price=max_price,
+        min_price=min_price,
+        text_contains=text_contains,
+    )
+
+    _SESSION_STATE["current_offers"] = list(result)
+    return result
 
 
 @observe(name="normalize_currency")
-def _normalize_offers_currency_tool(offers: Optional[List[Dict[str, Any]]] = None,
-                                    target_currency: str = "RUB") -> List[dict]:
-    if offers is None:
-        offers = _SESSION_STATE.get("offers", [])
-    return normalize_offers_currency(offers, target_currency)
+def _normalize_offers_currency_tool(
+    target_currency: str = "RUB",
+) -> list[dict]:
+    offers = _SESSION_STATE.get("current_offers", [])
+
+    result = normalize_offers_currency(
+        offers=offers,
+        target_currency=target_currency,
+    )
+
+    _SESSION_STATE["current_offers"] = result
+    return result
 
 
 @observe(name="compute_stats")
-def _compute_stats_tool(prices: Optional[List[int]] = None,
-                        offers: Optional[List[Dict[str, Any]]] = None) -> Dict[str, float]:
-    if prices is None and offers is None:
-        offers = _SESSION_STATE.get("offers", [])
-    if prices is None and offers is not None:
-        prices = [int(o.get("price", 0)) for o in offers]
-    return compute_stats(prices or [])
+def _compute_stats_tool() -> dict:
+    offers = _SESSION_STATE.get("current_offers", [])
+
+    prices = [
+        offer["price"]
+        for offer in offers
+        if isinstance(offer, dict) and offer.get("price") is not None
+    ]
+
+    if not prices:
+        return {
+            "min": None,
+            "max": None,
+            "avg": None,
+            "median": None,
+            "count": 0,
+        }
+
+    stats = compute_stats(prices)
+
+    return {
+        **stats,
+        "count": len(prices),
+        "currency": offers[0].get("currency", "USD"),
+    }
 
 
 class ExtractOffersArgs(BaseModel):
     url: str = Field(..., description="Страница с объявлениями")
-    limit: int = Field(50, description="Максимум объявлений")
+    limit: int = Field(10, ge=1, le=10, description="Максимум объявлений: 1–10")
 
 
 class FilterOffersArgs(BaseModel):
-    offers: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Список объявлений {title, price, currency, url}. Если не задан — берём последние извлечённые.")
-    min_price: Optional[int] = Field(None, description="Минимальная цена")
-    max_price: Optional[int] = Field(None, description="Максимальная цена")
+    min_price: Optional[int] = Field(
+        None,
+        description="Целое число без валюты, например 1800.",
+    )
+    max_price: Optional[int] = Field(
+        None,
+        description="Целое число без валюты, например 1800.",
+    )
     text_contains: Optional[str] = Field(
-        "", description="Подстрока в заголовке, например 'однокомнатная'")
+        None,
+        description='Подстрока в title, например "pet friendly".',
+    )
 
 
 class NormalizeCurrencyArgs(BaseModel):
-    offers: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Список объявлений. Если не задан — берём последние извлечённые.")
     target_currency: str = Field(
-        "RUB", description="Целевая валюта: RUB|USD|EUR")
+        "RUB",
+        description="Целевая валюта: RUB, USD или EUR.",
+    )
 
 
 class ComputeStatsArgs(BaseModel):
-    prices: Optional[List[int]] = Field(None, description="Список цен")
-    offers: Optional[List[Dict[str, Any]]] = Field(
-        None, description="Можно передать объявления вместо списка цен")
+    pass
 
 
 tools = [
@@ -115,17 +232,28 @@ tools = [
     ),
 ]
 
+tools_without_extract = [
+    tool
+    for tool in tools
+    if tool.name != "extract_offers"
+]
+
 prompt = ChatPromptTemplate.from_messages([
     ("system", SYSTEM),
     ("human",
      "Задача пользователя: {question}\n"
      "Ссылки (может быть пусто): {urls}\n"
      "План действий:"
-     "1) Если есть ссылки — извлеки объявления с каждой страницы (extract_offers)."
-     "2) Если просили фильтровать — применяй filter_offers."
-     "3) Если просили в другой валюте — normalize_offers_currency."
-     "4) Если нужна статистика — compute_stats."
-     "5) Сформируй краткий отчёт и добавь 3–5 примеров ссылок."
+     "1) Если в поле «Ссылки» есть полный URL — извлеки объявления "
+     "с каждой страницы через extract_offers.\n"
+     "2) Если поле «Ссылки» пустое — работай с ранее сохранёнными "
+     "объявлениями и не пытайся извлекать новые.\n"
+     "3) Если просили фильтровать — применяй filter_offers."
+     "4) Если просили в другой валюте — normalize_offers_currency."
+     "5) Если нужна статистика — compute_stats."
+     "6) Сформируй краткий отчёт. "
+    "Добавляй ссылки только из результата последнего tool call. "
+    "Если результатов нет — не добавляй ссылок."
      "Отвечай по-русски. Если данных нет — скажи об этом явно."),
     MessagesPlaceholder("agent_scratchpad"),
 ])
@@ -133,19 +261,35 @@ prompt = ChatPromptTemplate.from_messages([
 llm = ChatOllama(
     model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-    temperature=0.0)
+    temperature=0.0,
+    num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "12288")),)
 agent = create_tool_calling_agent(llm, tools, prompt)
 executor = AgentExecutor(
     agent=agent,
     tools=tools,
     handle_parsing_errors=True,
+    handle_tool_error=True,
     verbose=False,
     return_intermediate_steps=True,
 )
 
+agent_without_extract = create_tool_calling_agent(
+    llm,
+    tools_without_extract,
+    prompt,
+)
+
+executor_without_extract = AgentExecutor(
+    agent=agent_without_extract,
+    tools=tools_without_extract,
+    handle_parsing_errors=True,
+    handle_tool_error=True,
+    verbose=False,
+    return_intermediate_steps=True,
+)
 
 @observe(name="run_question")
-def run_question(question: str, urls: list[str], max_items: int = 50,
+def run_question(question: str, urls: list[str], max_items: int = 10,
                  session_id: Optional[str] = None, user_id: Optional[str] = None) -> Dict[str, Any]:
     langfuse_client = get_client()
 
@@ -165,6 +309,14 @@ def run_question(question: str, urls: list[str], max_items: int = 50,
         config["metadata"]["user_id"] = user_id
         config["tags"].append(f"user:{user_id}")
 
+    # Каждый новый вопрос начинает работу с объявлениями warmup.
+    # list(...) создаёт отдельную копию списка.
+    _SESSION_STATE["current_offers"] = list(
+        _SESSION_STATE.get("offers", [])
+    )
+
+    active_executor = executor if urls else executor_without_extract
+
     # Начинаем трассу / наблюдение
     with langfuse_client.start_as_current_observation(
         as_type="span", name="agent_execution"
@@ -178,12 +330,12 @@ def run_question(question: str, urls: list[str], max_items: int = 50,
 
         if attrs:
             with propagate_attributes(**attrs):
-                result = executor.invoke(
+                result = active_executor.invoke(
                     {"question": question, "urls": urls, "max_items": max_items},
                     config=config
                 )
         else:
-            result = executor.invoke(
+            result = active_executor.invoke(
                 {"question": question, "urls": urls, "max_items": max_items},
                 config=config
             )

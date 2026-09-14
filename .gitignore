@@ -27,3 +27,7 @@ desktop.ini
 results/*
 !results/.gitkeep
 reports/
+
+# Local DeepEval/runtime artifacts
+.deepeval/
+request_perf.json

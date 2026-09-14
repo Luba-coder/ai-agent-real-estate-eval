@@ -7,14 +7,31 @@ UA = os.getenv("USER_AGENT","SemanticScraper/1.1")
 MAX_HTML_CHARS = int(os.getenv("MAX_HTML_CHARS","160000"))
 
 def http_get(url: str, timeout: float = 20.0) -> str:
-    headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"}
-    with httpx.Client(timeout=timeout, follow_redirects=True, headers=headers) as client:
-        r = client.get(url)
-        r.raise_for_status()
-        html = r.text
-        if len(html) > MAX_HTML_CHARS:
-            html = html[:MAX_HTML_CHARS]
-        return html
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml",
+    }
+
+    try:
+        with httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        ) as client:
+            response = client.get(url)
+            response.raise_for_status()
+
+            html = response.text
+
+            if len(html) > MAX_HTML_CHARS:
+                html = html[:MAX_HTML_CHARS]
+
+            return html
+
+    except httpx.HTTPError as error:
+        raise RuntimeError(
+            f"Не удалось загрузить страницу {url}: {type(error).__name__}"
+        ) from error
 
 def absolutize(base_url: str, maybe_link: str) -> str:
     if not maybe_link:

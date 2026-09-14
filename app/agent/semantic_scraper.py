@@ -17,7 +17,7 @@ llm = ChatOllama(
     model=MODEL,
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
     temperature=0.0,
-    num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "8192")),
+    num_ctx=int(os.getenv("OLLAMA_NUM_CTX", "12288")),
 )
 
 parser = PydanticOutputParser(pydantic_object=ExtractionResult)
@@ -87,6 +87,8 @@ def extract_offers_from_html(
                 raise
 
             data = parser.parse(match.group(0))
+
+    data.offers = data.offers[:limit]
 
     data.offers = [
         Offer(

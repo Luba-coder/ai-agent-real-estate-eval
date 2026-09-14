@@ -35,3 +35,6 @@ langfuse
 # HTML parsing and HTTP client for semantic scraper
 beautifulsoup4
 httpx
+
+# DeepEval: shared file locks for saving test runs on Windows
+portalocker[win32]; platform_system == "Windows"

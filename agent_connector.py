@@ -12,7 +12,7 @@ class AgentConnector:
         self,
         endpoint_url: str,
         api_key: str,
-        user_id: str = "AleksM",
+        user_id: str = "lubov_konkina",
         session_id: Optional[str] = None,
         timeout: int = 120
     ):
@@ -41,60 +41,74 @@ class AgentConnector:
     def query(
         self,
         question: str,
-        urls: Optional[List[str]] = None
+        urls: Optional[List[str]] = None,
+        max_items: int = 10,
     ) -> Dict[str, Any]:
         """
-        Отправляет запрос к агенту
+        Отправляет запрос к агенту.
 
         Returns:
             Dict с полями:
-            - answer: текст ответа агента
-            - tools_used: список использованных тулов
-            - raw_response: полный ответ от API
+            - output: текст ответа агента
+            - tools_used: список использованных tools
+            - raw_response: полный ответ API
         """
-        try:
-            # Формируем body
-            body = {"question": question}
-            if urls:
-                body["urls"] = urls
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": self.api_key,
+        }
 
-            # Отправляем запрос
+        payload = {
+            "question": question,
+            "urls": urls or [],
+            "max_items": max_items,
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+        }
+
+        try:
             response = requests.post(
                 self.endpoint_url,
-                json=body,
-                headers=self._build_headers(),
-                timeout=self.timeout
+                json=payload,
+                headers=headers,
+                timeout=self.timeout,
             )
 
             response.raise_for_status()
             data = response.json()
 
-            # Извлекаем нужные данные
-            result = {
-                'output': data.get('output', ''),
-                'tools_used': data.get('tools_used', []),
-                'raw_response': data
+            return {
+                "output": data.get("output", ""),
+                "tools_used": data.get("tools_used", []),
+                "raw_response": data,
             }
-
-            return result
 
         except requests.exceptions.Timeout:
             return {
-                'error': 'Request timeout',
-                'output': '',
-                'tools_used': []
+                "error": "Request timeout",
+                "output": "",
+                "tools_used": [],
             }
-        except requests.exceptions.RequestException as e:
+
+        except requests.exceptions.RequestException as error:
             return {
-                'error': f'Request failed: {str(e)}',
-                'output': '',
-                'tools_used': []
+                "error": f"Request failed: {error}",
+                "output": "",
+                "tools_used": [],
             }
-        except Exception as e:
+
+        except ValueError as error:
             return {
-                'error': f'Unexpected error: {str(e)}',
-                'output': '',
-                'tools_used': []
+                "error": f"Invalid JSON in API response: {error}",
+                "output": "",
+                "tools_used": [],
+            }
+
+        except Exception as error:
+            return {
+                "error": f"Unexpected error: {error}",
+                "output": "",
+                "tools_used": [],
             }
 
     def batch_query(

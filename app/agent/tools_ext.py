@@ -12,6 +12,8 @@ STATIC_RATES = {
     ("EUR","RUB"): 100.0,
     ("USD","USD"): 1.0,
     ("EUR","EUR"): 1.0,
+    ("USD", "EUR"): 0.90,
+    ("EUR", "USD"): 1.11,  
 }
 
 def compute_stats(prices: List[int]) -> Dict[str, float]:
