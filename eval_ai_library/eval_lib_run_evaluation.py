@@ -6,6 +6,10 @@
 import sys
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio  # noqa: E402
@@ -33,6 +37,8 @@ async def evaluate_agent_with_eval_lib(
     threshold: float = 0.7,
     temperature: float = 0.5,
     sleep_time: float = 0.5,
+    max_cases: Optional[int] = None,
+    use_warmup: bool = True,
     verbose: bool = True,
     show_dashboard: bool = False,
     session_name: str = "Agent Evaluation"
@@ -86,6 +92,10 @@ async def evaluate_agent_with_eval_lib(
     pairs = parser.get_question_response_pairs(df)
     print(f"✅ Получено {len(pairs)} пар")
 
+    if max_cases is not None:
+        pairs = pairs[:max_cases]
+        print(f"🧪 Тестовый режим: запускается {len(pairs)} кейс(ов)")
+
     if urls:
         print(f"🔗 URLs для агента: {urls}")
 
@@ -94,15 +104,75 @@ async def evaluate_agent_with_eval_lib(
 
     test_cases = []
 
+    if use_warmup and urls:
+        print("\n🔄 Подготовка: извлекаем объявления по URL один раз...")
+
+        warmup_response = agent_connector.query(
+            question=(
+                "Извлеки объявления с указанных ссылок и сохрани "
+                "их для следующих запросов."
+            ),
+            urls=urls,
+        )
+
+        if warmup_response.get("error"):
+            print(
+                f"❌ Ошибка на этапе подготовки: "
+                f"{warmup_response['error']}"
+            )
+            return None
+
+        warmup_tools = warmup_response.get("tools_used", [])
+        print(f"✅ Warmup завершён. Tools: {warmup_tools}")
+
+        if "extract_offers" not in warmup_tools:
+            print(
+                "⚠️ Warmup не вызвал extract_offers. "
+                "Последующие кейсы могут работать с пустыми данными."
+            )
+
+        time.sleep(sleep_time)
+
+    if use_warmup:
+        pairs = [
+            pair
+            for pair in pairs
+            if pair.get("expected_tools") != ["extract_offers"]
+        ]
+        print(f"ℹ️ После исключения extraction-only кейсов: {len(pairs)}")
+
     for i, pair in enumerate(pairs, 1):
-        question = pair['question']
-        expected_response = pair['expected_response']
-        expected_tools = pair['expected_tools']
+        question = pair["question"]
+        expected_response = pair["expected_response"]
+        expected_tools = list(pair["expected_tools"])
+
+        if use_warmup:
+            expected_tools = [
+                tool_name
+                for tool_name in expected_tools
+                if tool_name != "extract_offers"
+            ]
+
+        evaluation_question = question
+
+        if use_warmup:
+            evaluation_question = (
+                "Контекст: список объявлений уже находится в памяти. "
+                "Не извлекай объявления повторно и не запрашивай URL. "
+                "Выполни исходный запрос пользователя с помощью нужных tools. "
+                "Если в запросе есть ограничение цены — используй filter_offers. "
+                "Если нужна валюта — используй normalize_offers_currency. "
+                "Если нужна статистика — используй compute_stats.\n\n"
+                f"{question}"
+    )
 
         print(f"\n[{i}/{len(pairs)}] {question[:60]}...")
 
         # Запрос к агенту с URLs
-        response = agent_connector.query(question, urls=urls)
+        response = agent_connector.query(
+            question=evaluation_question,
+            urls=None if use_warmup else urls,
+        )
 
         if response.get('error'):
             print(f"   ❌ {response['error']}")
@@ -201,60 +271,75 @@ async def evaluate_agent_with_eval_lib(
 
 
 async def scenario_1():
-    """Сценарий 2: Proxy модель"""
+    """Сценарий: оценка агента локальной Ollama-моделью."""
 
     print("\n" + "=" * 70)
-    print("📋 СЦЕНАРИЙ 2: Оценка с Proxy моделью")
+    print("📋 СЦЕНАРИЙ: Оценка с локальной Ollama")
     print("=" * 70)
 
-    # Агент
     agent = AgentConnector(
-        endpoint_url="http://5.11.83.110:8004/ask",
-        api_key="local-dev-key",
-        user_id="lubov_konkina",
-        # api_key="80456142-5441-4469-b97f-1d72b7802a93",
-        # user_id="Luba Kon",
-        session_id="3d647a4e-3198-409e-8d5b-701935156ef6"
+        endpoint_url=os.getenv(
+            "AGENT_ENDPOINT_URL",
+            "http://127.0.0.1:8004/ask",
+        ),
+        api_key=os.getenv("AGENT_API_KEY", "local-dev-key"),
+        user_id=os.getenv("AGENT_USER_ID", "lubov_konkina"),
+        session_id=os.getenv(
+            "EVALUATION_SESSION_ID",
+            "real-estate-eval-lib-v1",
+        ),
+        timeout=int(os.getenv("AGENT_TIMEOUT_SECONDS", "900")),
     )
 
-    # Proxy модель
-    proxy_model = create_proxy_llm(
-        model="gpt-4o-mini",
-        api_key="sk-proxy-d1yiB13gt0pyxdbeoaA5ZIv_hc0VJq4iBexunU2rdQg",
-        base_url="http://5.11.83.110:8000"
+    ollama_model = create_proxy_llm(
+        model=os.getenv(
+            "EVALLIB_OLLAMA_MODEL",
+            os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
+        ),
+        embedding_model=os.getenv(
+            "OLLAMA_EMBED_MODEL",
+            "nomic-embed-text",
+        ),
+        base_url=os.getenv(
+            "OLLAMA_BASE_URL",
+            "http://localhost:11434",
+        ),
+        temperature=0.0,
     )
 
-    # Датасет
-    excel_path = "data/evaluation_dataset.xlsx"
+    excel_path = os.getenv(
+        "EVALUATION_DATASET_PATH",
+        "data/evaluation_dataset.xlsx",
+    )
 
-    # URLs для агента
     test_urls = [
-        "https://www.rentalads.com/for-rent/fl/miami/"
+        os.getenv(
+            "EVALUATION_TEST_URL",
+            "https://www.rentalads.com/apartments-for-rent/ny/new-york/",
+        )
     ]
 
-    # Метрики
     metrics_to_use = [
-        'answer_relevancy',
-        'tool_correctness',
-        'task_success_rate'
+        "answer_relevancy",
+        "tool_correctness",
+        "task_success_rate",
     ]
 
-    # Запуск оценки
-    results = await evaluate_agent_with_eval_lib(
+    return await evaluate_agent_with_eval_lib(
         excel_path=excel_path,
         agent_connector=agent,
         metrics_list=metrics_to_use,
         urls=test_urls,
-        model=proxy_model,  # или просто "gpt-4o-mini"
-        threshold=0.7,
-        temperature=0.5,
-        sleep_time=0.5,
+        model=ollama_model,
+        threshold=float(os.getenv("EVALUATION_THRESHOLD", "0.7")),
+        temperature=0.0,
+        sleep_time=float(os.getenv("EVALUATION_SLEEP_SECONDS", "1.0")),
+        max_cases=None,
+        use_warmup=True,
         verbose=True,
-        show_dashboard=True,
-        session_name="Agent Evaluation - Proxy"
+        show_dashboard=False,
+        session_name="Agent Evaluation - Local Ollama",
     )
-
-    return results
 
 
 if __name__ == "__main__":
